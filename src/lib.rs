@@ -130,15 +130,28 @@ fn get_segments(bv: &BinaryView) -> Vec<SegmentInfo> {
 
 fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
     let mut xref_info = Vec::new();
+    let functions = bv.functions();
 
     for &func_name in DANGEROUS_FUNCTIONS {
         if let Some(symbol) = bv.symbol_by_raw_name(func_name) {
             let xrefs = bv.code_refs_to_addr(symbol.address());
             for xref in &xrefs {
-                if let Some(function) = bv.function_at(bv.default_platform().as_ref().unwrap(), xref.address) {
+                // Try to find the function containing this xref
+                let containing_function = functions
+                    .iter()
+                    .find(|func| func.start() <= xref.address && xref.address < func.highest_address());
+                
+                if let Some(function) = containing_function {
                     xref_info.push(XrefInfo {
                         function_name: func_name.to_string(),
                         function_start: format!("0x{:x}", function.start()),
+                        xref_address: format!("0x{:x}", xref.address),
+                    });
+                } else {
+                    // If no containing function found, still record the xref
+                    xref_info.push(XrefInfo {
+                        function_name: func_name.to_string(),
+                        function_start: "unknown".to_string(),
                         xref_address: format!("0x{:x}", xref.address),
                     });
                 }
