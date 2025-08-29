@@ -23,8 +23,8 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 
 1. Clone this repository:
    ```bash
-   git clone <repository-url>
-   cd rust_analysis
+   git clone https://github.com/meerkatone/rust_binary_analysis.git
+   cd rust_binary_analysis
    ```
 
 2. Set up Binary Ninja environment (if needed):
