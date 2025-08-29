@@ -15,7 +15,7 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 
 ### Prerequisites
 
-- [Binary Ninja](https://binary.ninja/) (Commercial or Personal license)
+- [Binary Ninja](https://binary.ninja/) (Commercial or Personal license latest dev build)
 - [Rust toolchain](https://rustup.rs/) (latest stable)
 - Binary Ninja API development headers
 
