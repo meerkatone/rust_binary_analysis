@@ -1,4 +1,4 @@
-use binaryninja::binary_view::{BinaryView, BinaryViewExt, BinaryViewBase};
+use binaryninja::binary_view::{BinaryView, BinaryViewBase};
 use binaryninja::function::Function;
 use binaryninja::Endianness;
 use binaryninja::command::register_command;
@@ -83,11 +83,11 @@ fn calculate_cyclomatic_complexity(function: &Function) -> u32 {
         .map(|block| block.outgoing_edges().len() as u32)
         .sum();
     let nodes = basic_blocks.len() as u32;
-    
+
     if nodes == 0 {
         return 1;
     }
-    
+
     edges - nodes + 2
 }
 
@@ -115,7 +115,7 @@ fn compute_entropy(data: &[u8]) -> f64 {
 fn get_segments(bv: &BinaryView) -> Vec<SegmentInfo> {
     // Simplified segment info extraction due to API complexities
     let mut segments = Vec::new();
-    
+
     // Use a basic approach to get segment information
     segments.push(SegmentInfo {
         start: bv.start(),
@@ -124,7 +124,7 @@ fn get_segments(bv: &BinaryView) -> Vec<SegmentInfo> {
         writable: false,
         executable: true,
     });
-    
+
     segments
 }
 
@@ -140,7 +140,7 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
                 let containing_function = functions
                     .iter()
                     .find(|func| func.start() <= xref.address && xref.address < func.highest_address());
-                
+
                 if let Some(function) = containing_function {
                     xref_info.push(XrefInfo {
                         function_name: func_name.to_string(),
@@ -164,7 +164,7 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
 
 fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let bv = binaryninja::load(path)?;
-    
+
     let functions = bv.functions();
     let mut complexities = Vec::new();
     let mut function_info = Vec::new();
@@ -308,7 +308,7 @@ fn write_results_to_parquet(results: &[BinaryAnalysisResult], output_file: &Path
     let file = fs::File::create(output_file)?;
     let props = WriterProperties::builder().build();
     let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
-    
+
     writer.write(&batch)?;
     writer.close()?;
 
@@ -319,7 +319,7 @@ fn analyse_directory_callback(_bv: &BinaryView) {
     if let Some(directory) = interaction::get_directory_name_input("Select directory of binaries to analyse", "") {
         let directory_path = Path::new(&directory);
         let output_file = directory_path.join("binary_analysis_results.parquet");
-        
+
         if let Err(e) = analyse_directory(directory_path, &output_file) {
             interaction::show_message_box(
                 "Error",
