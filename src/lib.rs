@@ -113,47 +113,45 @@ fn compute_entropy(data: &[u8]) -> f64 {
 }
 
 fn get_segments(bv: &BinaryView) -> Vec<SegmentInfo> {
-    // Simplified segment info extraction due to API complexities
-    let mut segments = Vec::new();
-
-    // Use a basic approach to get segment information
-    segments.push(SegmentInfo {
-        start: bv.start(),
-        end: bv.start() + bv.len(),
-        readable: true,
-        writable: false,
-        executable: true,
-    });
-
-    segments
+    bv.segments()
+        .iter()
+        .map(|segment| {
+            let range = segment.address_range();
+            SegmentInfo {
+                start: range.start,
+                end: range.end,
+                readable: segment.readable(),
+                writable: segment.writable(),
+                executable: segment.executable(),
+            }
+        })
+        .collect()
 }
 
 fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
     let mut xref_info = Vec::new();
-    let functions = bv.functions();
 
     for &func_name in DANGEROUS_FUNCTIONS {
         if let Some(symbol) = bv.symbol_by_raw_name(func_name) {
             let xrefs = bv.code_refs_to_addr(symbol.address());
             for xref in &xrefs {
-                // Try to find the function containing this xref
-                let containing_function = functions
-                    .iter()
-                    .find(|func| func.start() <= xref.address && xref.address < func.highest_address());
+                // Functions actually covering this xref address.
+                let containing = bv.functions_containing(xref.address);
 
-                if let Some(function) = containing_function {
-                    xref_info.push(XrefInfo {
-                        function_name: func_name.to_string(),
-                        function_start: format!("0x{:x}", function.start()),
-                        xref_address: format!("0x{:x}", xref.address),
-                    });
-                } else {
-                    // If no containing function found, still record the xref
+                if containing.is_empty() {
                     xref_info.push(XrefInfo {
                         function_name: func_name.to_string(),
                         function_start: "unknown".to_string(),
                         xref_address: format!("0x{:x}", xref.address),
                     });
+                } else {
+                    for function in containing.iter() {
+                        xref_info.push(XrefInfo {
+                            function_name: func_name.to_string(),
+                            function_start: format!("0x{:x}", function.start()),
+                            xref_address: format!("0x{:x}", xref.address),
+                        });
+                    }
                 }
             }
         }
