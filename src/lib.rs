@@ -1,23 +1,29 @@
-use binaryninja::binary_view::{BinaryView, BinaryViewBase};
-use binaryninja::function::Function;
-use binaryninja::Endianness;
+use binaryninja::binary_view::{BinaryView, BinaryViewBase, StringType};
 use binaryninja::command::register_command;
+use binaryninja::function::Function;
 use binaryninja::interaction;
+use binaryninja::Endianness;
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-use std::ffi::OsStr;
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
-use arrow::array::{StringArray, Float64Array};
+use arrow::array::{Float64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
+use std::thread;
 
 const DANGEROUS_FUNCTIONS: &[&str] = &[
-    "system", "execve", "execle", "execvp", "execlp", "doSystemCmd"
+    "system",
+    "execve",
+    "execle",
+    "execvp",
+    "execlp",
+    "doSystemCmd",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +85,8 @@ fn get_hash(bv: &BinaryView) -> String {
 
 fn calculate_cyclomatic_complexity(function: &Function) -> u32 {
     let basic_blocks = function.basic_blocks();
-    let edges: u32 = basic_blocks.iter()
+    let edges: u32 = basic_blocks
+        .iter()
         .map(|block| block.outgoing_edges().len() as u32)
         .sum();
     let nodes = basic_blocks.len() as u32;
@@ -110,6 +117,39 @@ fn compute_entropy(data: &[u8]) -> f64 {
     }
 
     entropy
+}
+
+fn decode_string(bv: &BinaryView, start: u64, length: usize, ty: StringType) -> String {
+    let data = bv.read_vec(start, length);
+    match ty {
+        StringType::Utf16String => {
+            let units = data
+                .chunks_exact(2)
+                .map(|chunk| match bv.default_endianness() {
+                    Endianness::LittleEndian => u16::from_le_bytes([chunk[0], chunk[1]]),
+                    Endianness::BigEndian => u16::from_be_bytes([chunk[0], chunk[1]]),
+                })
+                .take_while(|unit| *unit != 0)
+                .collect::<Vec<_>>();
+            String::from_utf16_lossy(&units)
+        }
+        StringType::Utf32String => data
+            .chunks_exact(4)
+            .map(|chunk| match bv.default_endianness() {
+                Endianness::LittleEndian => {
+                    u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                }
+                Endianness::BigEndian => {
+                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                }
+            })
+            .take_while(|value| *value != 0)
+            .filter_map(char::from_u32)
+            .collect(),
+        _ => String::from_utf8_lossy(&data)
+            .trim_end_matches('\0')
+            .to_string(),
+    }
 }
 
 fn get_segments(bv: &BinaryView) -> Vec<SegmentInfo> {
@@ -171,8 +211,10 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
         let cc = calculate_cyclomatic_complexity(&function);
         complexities.push(cc);
         function_info.push((
-            format!("{:?}", function.symbol().short_name()).trim_matches('"').to_string(),
-            format!("0x{:x}", function.start())
+            format!("{:?}", function.symbol().short_name())
+                .trim_matches('"')
+                .to_string(),
+            format!("0x{:x}", function.start()),
         ));
     }
 
@@ -187,9 +229,15 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let architecture = get_architecture(&bv);
     let endianness = get_endianness(&bv);
 
-    let strings: Vec<(String, String)> = bv.strings()
+    let strings: Vec<(String, String)> = bv
+        .strings()
         .iter()
-        .map(|s| (format!("string_at_0x{:x}", s.start), format!("0x{:x}", s.start)))
+        .map(|s| {
+            (
+                decode_string(&bv, s.start, s.length, s.ty),
+                format!("0x{:x}", s.start),
+            )
+        })
         .collect();
 
     let segment_info = get_segments(&bv);
@@ -212,7 +260,10 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     })
 }
 
-fn analyse_directory(directory: &Path, output_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn analyse_directory(
+    directory: &Path,
+    output_file: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
     let entries = fs::read_dir(directory)?;
     let mut binary_paths = Vec::new();
 
@@ -239,17 +290,13 @@ fn analyse_directory(directory: &Path, output_file: &Path) -> Result<(), Box<dyn
 
     write_results_to_parquet(&results, output_file)?;
 
-    interaction::show_message_box(
-        "Analysis Complete",
-        &format!("Analysed {} binaries.\nResults saved to {:?}", results.len(), output_file),
-        binaryninjacore_sys::BNMessageBoxButtonSet::OKButtonSet,
-        binaryninjacore_sys::BNMessageBoxIcon::InformationIcon
-    );
-
-    Ok(())
+    Ok(results.len())
 }
 
-fn write_results_to_parquet(results: &[BinaryAnalysisResult], output_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_results_to_parquet(
+    results: &[BinaryAnalysisResult],
+    output_file: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("Binary", DataType::Utf8, false),
         Field::new("File_Hash", DataType::Utf8, false),
@@ -314,18 +361,39 @@ fn write_results_to_parquet(results: &[BinaryAnalysisResult], output_file: &Path
 }
 
 fn analyse_directory_callback(_bv: &BinaryView) {
-    if let Some(directory) = interaction::get_directory_name_input("Select directory of binaries to analyse", "") {
-        let directory_path = Path::new(&directory);
+    if let Some(directory) =
+        interaction::get_directory_name_input("Select directory of binaries to analyse", "")
+    {
+        let directory_path = directory;
         let output_file = directory_path.join("binary_analysis_results.parquet");
-
-        if let Err(e) = analyse_directory(directory_path, &output_file) {
-            interaction::show_message_box(
-                "Error",
-                &format!("Error during analysis: {}", e),
-                binaryninjacore_sys::BNMessageBoxButtonSet::OKButtonSet,
-                binaryninjacore_sys::BNMessageBoxIcon::ErrorIcon
-            );
-        }
+        thread::spawn(move || {
+            let outcome = analyse_directory(&directory_path, &output_file)
+                .map(|count| {
+                    (
+                        "Analysis Complete".to_string(),
+                        format!(
+                            "Analysed {} binaries.\nResults saved to {:?}",
+                            count, output_file
+                        ),
+                        binaryninjacore_sys::BNMessageBoxIcon::InformationIcon,
+                    )
+                })
+                .unwrap_or_else(|error| {
+                    (
+                        "Error".to_string(),
+                        format!("Error during analysis: {}", error),
+                        binaryninjacore_sys::BNMessageBoxIcon::ErrorIcon,
+                    )
+                });
+            binaryninja::main_thread::execute_on_main_thread(move || {
+                interaction::show_message_box(
+                    &outcome.0,
+                    &outcome.1,
+                    binaryninjacore_sys::BNMessageBoxButtonSet::OKButtonSet,
+                    outcome.2,
+                );
+            });
+        });
     }
 }
 

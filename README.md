@@ -8,7 +8,7 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 - **Cyclomatic Complexity Analysis**: Calculates complexity metrics for all functions to identify potentially problematic code
 - **Entropy Analysis**: Computes binary entropy to detect packed or obfuscated executables
 - **Architecture & Metadata Extraction**: Captures target architecture, endianness, and file hashing
-- **Batch Processing**: Analyze entire directories of binaries in one operation
+- **Batch Processing**: Analyze entire directories on a worker thread without blocking Binary Ninja's UI
 - **Structured Output**: Results exported to Parquet format for data analysis and reporting
 
 ## Installation
@@ -59,7 +59,7 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 1. Open Binary Ninja with any binary file loaded
 2. Navigate to the menu: **Binary Analysis Tool → Analyse Directory**
 3. Select a directory containing the binary files you want to analyze
-4. The plugin will process all files in the directory and save results to `binary_analysis_results.parquet`
+4. The plugin processes the directory in the background and saves results to `binary_analysis_results.parquet`; the completion dialog is shown on Binary Ninja's main thread
 
 ## Output Format
 
@@ -74,7 +74,7 @@ The plugin generates a Parquet file with the following structure:
 | `Average_Cyclomatic_Complexity` | Float | Mean complexity across all functions |
 | `Entropy` | Float | Binary entropy (0-8, higher = more random/packed) |
 | `Functions` | JSON String | Array of function names and addresses |
-| `Strings` | JSON String | Array of strings found in the binary |
+| `Strings` | JSON String | Array of decoded string contents and addresses (ASCII/UTF-8, UTF-16, and UTF-32) |
 | `Segments` | JSON String | Memory segment information |
 | `Xrefs_to_System` | JSON String | Cross-references to dangerous functions |
 
