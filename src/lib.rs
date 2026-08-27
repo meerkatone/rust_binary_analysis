@@ -76,10 +76,9 @@ fn get_endianness(bv: &BinaryView) -> String {
     }
 }
 
-fn get_hash(bv: &BinaryView) -> String {
-    let data = bv.read_vec(bv.start(), bv.len().try_into().unwrap());
+fn get_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
 
@@ -201,6 +200,9 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
 }
 
 fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
+    // Hash and entropy describe the original input file, not Binary Ninja's
+    // potentially sparse or synthesized virtual address space.
+    let file_bytes = fs::read(path).ok()?;
     let bv = binaryninja::load(path)?;
 
     let functions = bv.functions();
@@ -225,7 +227,7 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     };
 
     let filename = get_file_name(path);
-    let file_hash = get_hash(&bv);
+    let file_hash = get_hash(&file_bytes);
     let architecture = get_architecture(&bv);
     let endianness = get_endianness(&bv);
 
@@ -243,8 +245,7 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let segment_info = get_segments(&bv);
     let xrefs = find_xrefs_to_dangerous_functions(&bv);
 
-    let binary_data = bv.read_vec(bv.start(), bv.len().try_into().unwrap());
-    let entropy = compute_entropy(&binary_data);
+    let entropy = compute_entropy(&file_bytes);
 
     Some(BinaryAnalysisResult {
         binary: filename,
@@ -405,4 +406,32 @@ pub extern "C" fn CorePluginInit() -> bool {
         analyse_directory_callback,
     );
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_empty_parquet_export_has_consistent_column_lengths() {
+        let result = BinaryAnalysisResult {
+            binary: "sample.bin".to_string(),
+            file_hash: get_hash(b"sample"),
+            architecture: "test".to_string(),
+            endianness: "Little".to_string(),
+            average_cyclomatic_complexity: 1.0,
+            entropy: compute_entropy(b"sample"),
+            functions: vec![],
+            strings: vec![],
+            segments: vec![],
+            xrefs_to_system: vec![],
+        };
+        let output = std::env::temp_dir().join(format!(
+            "rust_binary_analysis_{}_column_lengths.parquet",
+            std::process::id()
+        ));
+        write_results_to_parquet(&[result], &output).unwrap();
+        assert!(fs::metadata(&output).unwrap().len() > 0);
+        fs::remove_file(output).unwrap();
+    }
 }
