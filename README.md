@@ -34,10 +34,14 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 
 3. Build the plugin:
    ```bash
-   cargo build --release
+   cargo build --locked --release
+   ```
 
-   If the plugin fails to load due to the following error message "This plugin was built for an outdated core ABI (XXX). Please rebuild the plugin with the latest API (XXX)." Please use the following to update the dependencies:
-   cargo update && cargo build --release
+   If Binary Ninja reports that the plugin was built for an outdated core ABI, update the lockfile deliberately and rebuild:
+
+   ```bash
+   cargo update
+   cargo build --locked --release
    ```
 
 4. Copy the compiled plugin to Binary Ninja's plugin directory:
@@ -102,13 +106,13 @@ The plugin specifically tracks usage of:
 ### Build Commands
 ```bash
 # Development build
-cargo build
+cargo build --locked
 
 # Release build
-cargo build --release
+cargo build --locked --release
 
 # Check code without building
-cargo check
+cargo check --locked
 
 # Clean build artifacts
 cargo clean
