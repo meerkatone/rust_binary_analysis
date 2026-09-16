@@ -37,6 +37,14 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
    cargo build --locked --release
    ```
 
+   On macOS, repair the output if Apple `ld` emitted a misaligned Mach-O
+   `LINKEDIT` string pool:
+
+   ```bash
+   python3 scripts/fix_macho_linkedit.py \
+     target/release/libbinary_analysis_plugin.dylib
+   ```
+
    If Binary Ninja reports that the plugin was built for an outdated core ABI, update the lockfile deliberately and rebuild:
 
    ```bash
