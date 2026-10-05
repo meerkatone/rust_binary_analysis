@@ -84,17 +84,22 @@ fn get_hash(data: &[u8]) -> String {
 
 fn calculate_cyclomatic_complexity(function: &Function) -> u32 {
     let basic_blocks = function.basic_blocks();
-    let edges: u32 = basic_blocks
+    let edges: u64 = basic_blocks
         .iter()
-        .map(|block| block.outgoing_edges().len() as u32)
+        .map(|block| block.outgoing_edges().len() as u64)
         .sum();
-    let nodes = basic_blocks.len() as u32;
+    let nodes = basic_blocks.len() as u64;
 
     if nodes == 0 {
         return 1;
     }
 
-    edges - nodes + 2
+    complexity_from_counts(edges, nodes)
+}
+
+fn complexity_from_counts(edges: u64, nodes: u64) -> u32 {
+    let complexity = (i128::from(edges) - i128::from(nodes) + 2).clamp(1, i128::from(u32::MAX));
+    complexity as u32
 }
 
 fn compute_entropy(data: &[u8]) -> f64 {
@@ -411,6 +416,14 @@ pub extern "C" fn CorePluginInit() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complexity_handles_acyclic_and_branching_graphs_without_underflow() {
+        assert_eq!(complexity_from_counts(0, 1), 1);
+        assert_eq!(complexity_from_counts(1099, 1100), 1);
+        assert_eq!(complexity_from_counts(4, 4), 2);
+        assert_eq!(complexity_from_counts(u64::MAX, 1), u32::MAX);
+    }
 
     #[test]
     fn non_empty_parquet_export_has_consistent_column_lengths() {
