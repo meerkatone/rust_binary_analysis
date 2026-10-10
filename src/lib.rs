@@ -225,11 +225,7 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
         ));
     }
 
-    let avg_cc = if complexities.is_empty() {
-        0.0
-    } else {
-        complexities.iter().sum::<u32>() as f64 / complexities.len() as f64
-    };
+    let avg_cc = average_complexity(&complexities);
 
     let filename = get_file_name(path);
     let file_hash = get_hash(&file_bytes);
@@ -264,6 +260,17 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
         segments: segment_info,
         xrefs_to_system: xrefs,
     })
+}
+
+fn average_complexity(complexities: &[u32]) -> f64 {
+    if complexities.is_empty() {
+        return 0.0;
+    }
+    complexities
+        .iter()
+        .map(|&value| f64::from(value))
+        .sum::<f64>()
+        / complexities.len() as f64
 }
 
 fn analyse_directory(
@@ -423,6 +430,16 @@ mod tests {
         assert_eq!(complexity_from_counts(1099, 1100), 1);
         assert_eq!(complexity_from_counts(4, 4), 2);
         assert_eq!(complexity_from_counts(u64::MAX, 1), u32::MAX);
+    }
+
+    #[test]
+    fn average_complexity_does_not_overflow_u32_total() {
+        assert_eq!(average_complexity(&[]), 0.0);
+        assert_eq!(average_complexity(&[1, 3]), 2.0);
+        assert_eq!(
+            average_complexity(&[u32::MAX, u32::MAX]),
+            f64::from(u32::MAX)
+        );
     }
 
     #[test]
