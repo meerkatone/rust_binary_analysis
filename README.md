@@ -71,7 +71,13 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 1. Open Binary Ninja with any binary file loaded
 2. Navigate to the menu: **Binary Analysis Tool → Analyse Directory**
 3. Select a directory containing the binary files you want to analyze
-4. The plugin processes the directory in the background and saves results to `binary_analysis_results.parquet`; the completion dialog is shown on Binary Ninja's main thread
+4. The plugin processes the directory in the background and saves results to `binary_analysis_results.parquet` in that directory; the completion dialog is shown on Binary Ninja's main thread
+
+Every regular file at the top level of the directory is analysed, except
+hidden files (names starting with `.`, such as `.DS_Store`) and the results
+file itself, so re-running on the same directory does not ingest the previous
+output. Each binary's view is closed after analysis, so memory use does not
+grow with the number of files.
 
 ## Output Format
 
@@ -97,6 +103,9 @@ The plugin specifically tracks usage of:
 - `system` - Command execution
 - `execve`, `execle`, `execvp`, `execlp` - Process execution
 - `doSystemCmd` - Custom system command functions
+
+Each name is looked up both as written and with a leading underscore
+(`_system`), because Mach-O and 32-bit Windows symbols carry that prefix.
 
 ### Complexity Analysis
 - Calculates cyclomatic complexity using the formula: E - N + 2P (edges - nodes + 2 * connected components)
