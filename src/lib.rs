@@ -176,8 +176,17 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
     let mut xref_info = Vec::new();
 
     for &func_name in DANGEROUS_FUNCTIONS {
-        if let Some(symbol) = bv.symbol_by_raw_name(func_name) {
-            let xrefs = bv.code_refs_to_addr(symbol.address());
+        // Mach-O and 32-bit Windows symbols carry a leading underscore.
+        let mut addresses = Vec::new();
+        for raw_name in [func_name.to_string(), format!("_{func_name}")] {
+            if let Some(symbol) = bv.symbol_by_raw_name(raw_name.as_str()) {
+                if !addresses.contains(&symbol.address()) {
+                    addresses.push(symbol.address());
+                }
+            }
+        }
+        for address in addresses {
+            let xrefs = bv.code_refs_to_addr(address);
             for xref in &xrefs {
                 // Functions actually covering this xref address.
                 let containing = bv.functions_containing(xref.address);
@@ -247,6 +256,8 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let xrefs = find_xrefs_to_dangerous_functions(&bv);
 
     let entropy = compute_entropy(&file_bytes);
+    // Views parented to an open FileMetadata are not freed on drop.
+    bv.file().close();
 
     Some(BinaryAnalysisResult {
         binary: filename,
@@ -273,6 +284,20 @@ fn average_complexity(complexities: &[u32]) -> f64 {
         / complexities.len() as f64
 }
 
+/// Skip the results file (written into the scanned directory) and hidden
+/// files such as .DS_Store, which Binary Ninja would otherwise open as raw views.
+fn is_excluded_input(path: &Path, output_file: &Path) -> bool {
+    let hidden = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.starts_with('.'));
+    let is_output = match (fs::canonicalize(path), fs::canonicalize(output_file)) {
+        (Ok(input), Ok(output)) => input == output,
+        _ => path == output_file,
+    };
+    hidden || is_output
+}
+
 fn analyse_directory(
     directory: &Path,
     output_file: &Path,
@@ -283,7 +308,7 @@ fn analyse_directory(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
+        if path.is_file() && !is_excluded_input(&path, output_file) {
             binary_paths.push(path);
         }
     }
@@ -430,6 +455,25 @@ mod tests {
         assert_eq!(complexity_from_counts(1099, 1100), 1);
         assert_eq!(complexity_from_counts(4, 4), 2);
         assert_eq!(complexity_from_counts(u64::MAX, 1), u32::MAX);
+    }
+
+    #[test]
+    fn directory_scan_excludes_its_output_and_hidden_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "rust_binary_analysis_{}_exclusions",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("binary_analysis_results.parquet");
+        let binary = directory.join("sample.bin");
+        let hidden = directory.join(".DS_Store");
+        for path in [&output, &binary, &hidden] {
+            fs::write(path, b"x").unwrap();
+        }
+        assert!(is_excluded_input(&output, &output));
+        assert!(is_excluded_input(&hidden, &output));
+        assert!(!is_excluded_input(&binary, &output));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
