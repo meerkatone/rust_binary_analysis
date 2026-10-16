@@ -1,3 +1,4 @@
+mod atomic_output;
 use binaryninja::binary_view::{BinaryView, BinaryViewBase, StringType};
 use binaryninja::command::register_command;
 use binaryninja::function::Function;
@@ -232,7 +233,11 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
         // Debug formatting escaped quotes, backslashes, and control
         // characters in the exported name.
         function_info.push((
-            function.symbol().short_name().to_string_lossy().into_owned(),
+            function
+                .symbol()
+                .short_name()
+                .to_string_lossy()
+                .into_owned(),
             format!("0x{:x}", function.start()),
         ));
     }
@@ -391,12 +396,13 @@ fn write_results_to_parquet(
         ],
     )?;
 
-    let file = fs::File::create(output_file)?;
+    let mut output = atomic_output::AtomicOutput::new(output_file)?;
     let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(&mut output.file, batch.schema(), Some(props))?;
 
     writer.write(&batch)?;
     writer.close()?;
+    output.commit()?;
 
     Ok(())
 }

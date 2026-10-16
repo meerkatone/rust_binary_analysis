@@ -162,3 +162,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
+
+Reports now use a unique temporary file beside the destination, followed by
+close, sync, and atomic rename. Failed exports preserve an existing report.
