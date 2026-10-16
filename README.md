@@ -106,6 +106,8 @@ The plugin specifically tracks usage of:
 
 Each name is looked up both as written and with a leading underscore
 (`_system`), because Mach-O and 32-bit Windows symbols carry that prefix.
+Every symbol with the name is used, so an import's stub and its external
+symbol both contribute their callers.
 
 ### Complexity Analysis
 - Calculates cyclomatic complexity using the formula: E - N + 2P (edges - nodes + 2 * connected components)
@@ -140,6 +142,16 @@ cargo clean
 - `arrow`/`parquet`: Data serialization and export
 - `serde`: JSON serialization
 - `sha2`: Cryptographic hashing
+
+## Validation
+
+As of 16 October 2026, `cargo test --locked` passes all 4 tests and
+`cargo clippy --locked --all-targets -- -D warnings` is clean. On macOS, set
+`DYLD_LIBRARY_PATH` to the active application's `Contents/MacOS` directory
+when the test executable cannot locate the BN core. The tests cover graph
+complexity, directory selection, and Parquet output. Live verification of
+multi-symbol import lookup and unescaped function-name export remains pending
+a plugin reload; the release library has been rebuilt.
 
 ## License
 

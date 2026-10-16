@@ -176,10 +176,13 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
     let mut xref_info = Vec::new();
 
     for &func_name in DANGEROUS_FUNCTIONS {
-        // Mach-O and 32-bit Windows symbols carry a leading underscore.
+        // Mach-O and 32-bit Windows symbols carry a leading underscore. An
+        // import usually has several symbols under one name (the PLT or stub
+        // function and the external symbol), and calls reference the stub, so
+        // collect every match rather than one arbitrary symbol.
         let mut addresses = Vec::new();
-        for raw_name in [func_name.to_string(), format!("_{func_name}")] {
-            if let Some(symbol) = bv.symbol_by_raw_name(raw_name.as_str()) {
+        for name in [func_name.to_string(), format!("_{func_name}")] {
+            for symbol in bv.symbols_by_name(name.as_str()).iter() {
                 if !addresses.contains(&symbol.address()) {
                     addresses.push(symbol.address());
                 }
@@ -226,10 +229,10 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     for function in &functions {
         let cc = calculate_cyclomatic_complexity(&function);
         complexities.push(cc);
+        // Debug formatting escaped quotes, backslashes, and control
+        // characters in the exported name.
         function_info.push((
-            format!("{:?}", function.symbol().short_name())
-                .trim_matches('"')
-                .to_string(),
+            function.symbol().short_name().to_string_lossy().into_owned(),
             format!("0x{:x}", function.start()),
         ));
     }
