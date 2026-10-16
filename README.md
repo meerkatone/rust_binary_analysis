@@ -149,9 +149,11 @@ As of 16 October 2026, `cargo test --locked` passes all 4 tests and
 `cargo clippy --locked --all-targets -- -D warnings` is clean. On macOS, set
 `DYLD_LIBRARY_PATH` to the active application's `Contents/MacOS` directory
 when the test executable cannot locate the BN core. The tests cover graph
-complexity, directory selection, and Parquet output. Live verification of
-multi-symbol import lookup and unescaped function-name export remains pending
-a plugin reload; the release library has been rebuilt.
+complexity, directory selection, and Parquet output. The rebuilt command also
+passed in Binary Ninja Personal 6.1.10951-dev: its Parquet output includes both
+the `_system` caller and import-address reference, and JSON decoding preserves
+an analyst function name containing a quote and backslash. This was checked
+with a scratch BNDB through the registered GUI command.
 
 ## License
 
