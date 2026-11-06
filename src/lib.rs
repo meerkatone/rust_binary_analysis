@@ -12,7 +12,6 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -108,15 +107,15 @@ fn compute_entropy(data: &[u8]) -> f64 {
         return 0.0;
     }
 
-    let mut byte_count = HashMap::new();
+    let mut byte_count = [0u64; 256];
     for &byte in data {
-        *byte_count.entry(byte).or_insert(0) += 1;
+        byte_count[usize::from(byte)] += 1;
     }
 
     let data_length = data.len() as f64;
     let mut entropy = 0.0;
 
-    for &count in byte_count.values() {
+    for &count in byte_count.iter().filter(|&&count| count != 0) {
         let probability = count as f64 / data_length;
         entropy -= probability * probability.log2();
     }
@@ -126,26 +125,33 @@ fn compute_entropy(data: &[u8]) -> f64 {
 
 fn decode_string(bv: &BinaryView, start: u64, length: usize, ty: StringType) -> String {
     let data = bv.read_vec(start, length);
+    let little_endian = matches!(bv.default_endianness(), Endianness::LittleEndian);
     match ty {
         StringType::Utf16String => {
             let units = data
-                .chunks_exact(2)
-                .map(|chunk| match bv.default_endianness() {
-                    Endianness::LittleEndian => u16::from_le_bytes([chunk[0], chunk[1]]),
-                    Endianness::BigEndian => u16::from_be_bytes([chunk[0], chunk[1]]),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&chunk| {
+                    if little_endian {
+                        u16::from_le_bytes(chunk)
+                    } else {
+                        u16::from_be_bytes(chunk)
+                    }
                 })
                 .take_while(|unit| *unit != 0)
                 .collect::<Vec<_>>();
             String::from_utf16_lossy(&units)
         }
         StringType::Utf32String => data
-            .chunks_exact(4)
-            .map(|chunk| match bv.default_endianness() {
-                Endianness::LittleEndian => {
-                    u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                }
-                Endianness::BigEndian => {
-                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&chunk| {
+                if little_endian {
+                    u32::from_le_bytes(chunk)
+                } else {
+                    u32::from_be_bytes(chunk)
                 }
             })
             .take_while(|value| *value != 0)
@@ -464,6 +470,15 @@ mod tests {
         assert_eq!(complexity_from_counts(1099, 1100), 1);
         assert_eq!(complexity_from_counts(4, 4), 2);
         assert_eq!(complexity_from_counts(u64::MAX, 1), u32::MAX);
+    }
+
+    #[test]
+    fn entropy_matches_shannon_bounds() {
+        assert_eq!(compute_entropy(&[]), 0.0);
+        assert_eq!(compute_entropy(&[0x41; 64]), 0.0);
+        assert!((compute_entropy(&[0, 1, 0, 1]) - 1.0).abs() < 1e-12);
+        let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+        assert!((compute_entropy(&every_byte) - 8.0).abs() < 1e-12);
     }
 
     #[test]
