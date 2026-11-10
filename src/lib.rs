@@ -1,8 +1,10 @@
 mod atomic_output;
+use binaryninja::background_task::BackgroundTask;
 use binaryninja::binary_view::{BinaryView, BinaryViewBase, StringType};
 use binaryninja::command::register_command;
 use binaryninja::function::Function;
 use binaryninja::interaction;
+use binaryninja::logger::{BnLogLevel, Logger};
 use binaryninja::Endianness;
 
 use arrow::array::{Float64Array, StringArray};
@@ -14,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 
 const DANGEROUS_FUNCTIONS: &[&str] = &[
@@ -312,37 +314,82 @@ fn is_excluded_input(path: &Path, output_file: &Path) -> bool {
     hidden || is_output
 }
 
+/// `results.parquet` -> `results.cancelled.parquet`, so a cancelled run never
+/// replaces the last complete report.
+fn cancelled_output_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "binary_analysis_results".to_string());
+    let name = match path.extension() {
+        Some(extension) => format!("{stem}.cancelled.{}", extension.to_string_lossy()),
+        None => format!("{stem}.cancelled"),
+    };
+    path.with_file_name(name)
+}
+
+/// Files to analyse, in sorted order so report rows are stable across runs.
+/// Both reports this plugin writes into the directory are left out.
+fn collect_inputs(directory: &Path, output_file: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let partial_output = cancelled_output_path(output_file);
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_file()
+            && !is_excluded_input(&path, output_file)
+            && !is_excluded_input(&path, &partial_output)
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+struct DirectoryOutcome {
+    analysed: usize,
+    failed: Vec<String>,
+    cancelled: bool,
+    report: PathBuf,
+}
+
+/// Analyse every input in `directory`. `on_file(index, total, path)` runs
+/// before each file and returns false to cancel; results gathered until then
+/// are written to the `.cancelled` report.
 fn analyse_directory(
     directory: &Path,
     output_file: &Path,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let entries = fs::read_dir(directory)?;
-    let mut binary_paths = Vec::new();
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && !is_excluded_input(&path, output_file) {
-            binary_paths.push(path);
-        }
-    }
-
-    println!("Analysing {} binaries...", binary_paths.len());
+    on_file: &dyn Fn(usize, usize, &Path) -> bool,
+) -> Result<DirectoryOutcome, Box<dyn std::error::Error>> {
+    let binary_paths = collect_inputs(directory, output_file)?;
 
     let mut results = Vec::new();
-    for path in &binary_paths {
-        println!("Analysing {:?}...", path);
-        if let Some(result) = analyse_binary(path) {
-            results.push(result);
+    let mut failed = Vec::new();
+    let mut cancelled = false;
+    for (index, path) in binary_paths.iter().enumerate() {
+        if !on_file(index, binary_paths.len(), path) {
+            cancelled = true;
+            break;
+        }
+        match analyse_binary(path) {
+            Some(result) => results.push(result),
+            None => failed.push(get_file_name(path)),
         }
     }
 
-    println!("Processed {} valid binaries", results.len());
-    println!("Writing results to {:?}", output_file);
+    let report = if cancelled {
+        cancelled_output_path(output_file)
+    } else {
+        output_file.to_path_buf()
+    };
+    write_results_to_parquet(&results, &report)?;
 
-    write_results_to_parquet(&results, output_file)?;
-
-    Ok(results.len())
+    Ok(DirectoryOutcome {
+        analysed: results.len(),
+        failed,
+        cancelled,
+        report,
+    })
 }
 
 fn write_results_to_parquet(
@@ -413,6 +460,24 @@ fn write_results_to_parquet(
     Ok(())
 }
 
+fn outcome_message(outcome: &DirectoryOutcome) -> String {
+    let mut message = format!(
+        "Analysed {} binaries.\nResults saved to {:?}",
+        outcome.analysed, outcome.report
+    );
+    if outcome.cancelled {
+        message.push_str("\nThe scan was cancelled; the previous complete report was kept.");
+    }
+    if !outcome.failed.is_empty() {
+        message.push_str(&format!(
+            "\n{} file(s) could not be loaded: {}",
+            outcome.failed.len(),
+            outcome.failed.join(", ")
+        ));
+    }
+    message
+}
+
 fn analyse_directory_callback(_bv: &BinaryView) {
     if let Some(directory) =
         interaction::get_directory_name_input("Select directory of binaries to analyse", "")
@@ -420,21 +485,53 @@ fn analyse_directory_callback(_bv: &BinaryView) {
         let directory_path = directory;
         let output_file = directory_path.join("binary_analysis_results.parquet");
         thread::spawn(move || {
-            let outcome = analyse_directory(&directory_path, &output_file)
-                .map(|count| {
+            let logger = Logger::new("rust_binary_analysis");
+            let task = BackgroundTask::new("Analysing binaries", true);
+            let _guard = task.enter();
+            let outcome =
+                analyse_directory(&directory_path, &output_file, &|index, total, path| {
+                    if task.is_cancelled() {
+                        return false;
+                    }
+                    let name = get_file_name(path);
+                    task.set_progress_text(&format!("Analysing {}/{}: {}", index + 1, total, name));
+                    logger.log(
+                        BnLogLevel::InfoLog,
+                        &format!("Analysing {}/{}: {}", index + 1, total, name),
+                    );
+                    true
+                })
+                .map(|outcome| {
+                    let message = outcome_message(&outcome);
+                    let partial = outcome.cancelled || !outcome.failed.is_empty();
+                    logger.log(
+                        if partial {
+                            BnLogLevel::WarningLog
+                        } else {
+                            BnLogLevel::InfoLog
+                        },
+                        &message.replace('\n', " "),
+                    );
                     (
-                        "Analysis Complete".to_string(),
-                        format!(
-                            "Analysed {} binaries.\nResults saved to {:?}",
-                            count, output_file
-                        ),
-                        binaryninjacore_sys::BNMessageBoxIcon::InformationIcon,
+                        if outcome.cancelled {
+                            "Analysis Cancelled".to_string()
+                        } else {
+                            "Analysis Complete".to_string()
+                        },
+                        message,
+                        if partial {
+                            binaryninjacore_sys::BNMessageBoxIcon::WarningIcon
+                        } else {
+                            binaryninjacore_sys::BNMessageBoxIcon::InformationIcon
+                        },
                     )
                 })
                 .unwrap_or_else(|error| {
+                    let message = format!("Error during analysis: {}", error);
+                    logger.log(BnLogLevel::ErrorLog, &message);
                     (
                         "Error".to_string(),
-                        format!("Error during analysis: {}", error),
+                        message,
                         binaryninjacore_sys::BNMessageBoxIcon::ErrorIcon,
                     )
                 });
@@ -497,6 +594,68 @@ mod tests {
         assert!(is_excluded_input(&output, &output));
         assert!(is_excluded_input(&hidden, &output));
         assert!(!is_excluded_input(&binary, &output));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inputs_are_sorted_and_skip_both_reports() {
+        let directory = std::env::temp_dir().join(format!(
+            "rust_binary_analysis_{}_inputs",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("binary_analysis_results.parquet");
+        let partial = cancelled_output_path(&output);
+        assert_eq!(
+            partial,
+            directory.join("binary_analysis_results.cancelled.parquet")
+        );
+        assert_eq!(
+            cancelled_output_path(Path::new("/out/report")),
+            Path::new("/out/report.cancelled")
+        );
+        for name in ["zeta.bin", "alpha.bin", ".hidden", "mid.so"] {
+            fs::write(directory.join(name), b"x").unwrap();
+        }
+        fs::write(&output, b"x").unwrap();
+        fs::write(&partial, b"x").unwrap();
+        fs::create_dir_all(directory.join("subdirectory")).unwrap();
+        let inputs = collect_inputs(&directory, &output).unwrap();
+        let names: Vec<_> = inputs.iter().map(|path| get_file_name(path)).collect();
+        assert_eq!(names, ["alpha.bin", "mid.so", "zeta.bin"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancelled_scan_keeps_the_complete_report_and_lists_failures() {
+        let directory = std::env::temp_dir().join(format!(
+            "rust_binary_analysis_{}_cancelled",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("binary_analysis_results.parquet");
+        fs::write(&output, b"previous complete report").unwrap();
+        fs::write(directory.join("sample.bin"), b"x").unwrap();
+        // Cancel before the first file, so no Binary Ninja load is attempted.
+        let outcome = analyse_directory(&directory, &output, &|_, total, _| {
+            assert_eq!(total, 1);
+            false
+        })
+        .unwrap();
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.analysed, 0);
+        assert_eq!(outcome.report, cancelled_output_path(&output));
+        assert_eq!(fs::read(&output).unwrap(), b"previous complete report");
+        assert!(fs::metadata(&outcome.report).unwrap().len() > 0);
+        let message = outcome_message(&DirectoryOutcome {
+            analysed: 2,
+            failed: vec!["broken.bin".to_string()],
+            cancelled: true,
+            report: outcome.report.clone(),
+        });
+        assert!(message.contains("Analysed 2 binaries"));
+        assert!(message.contains("cancelled"));
+        assert!(message.contains("1 file(s) could not be loaded: broken.bin"));
         fs::remove_dir_all(directory).unwrap();
     }
 

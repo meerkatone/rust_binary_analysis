@@ -8,7 +8,7 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 - **Cyclomatic Complexity Analysis**: Calculates complexity metrics for all functions to identify potentially problematic code
 - **Entropy Analysis**: Computes binary entropy to detect packed or obfuscated executables
 - **Architecture & Metadata Extraction**: Captures target architecture, endianness, and file hashing
-- **Batch Processing**: Analyze entire directories on a worker thread without blocking Binary Ninja's UI
+- **Batch Processing**: Analyze entire directories on a cancellable background task with per-file progress
 - **Structured Output**: Results exported to Parquet format for data analysis and reporting
 
 ## Installation
@@ -75,9 +75,17 @@ A Binary Ninja plugin written in Rust that performs comprehensive security-focus
 
 Every regular file at the top level of the directory is analysed, except
 hidden files (names starting with `.`, such as `.DS_Store`) and the results
-file itself, so re-running on the same directory does not ingest the previous
-output. Each binary's view is closed after analysis, so memory use does not
-grow with the number of files.
+files this plugin writes, so re-running on the same directory does not ingest the previous
+output. Files are analysed in sorted name order, so report rows are stable
+across runs. Each binary's view is closed after analysis, so memory use does
+not grow with the number of files.
+
+The scan runs as a background task: the status bar shows
+`Analysing <n>/<total>: <file>` and the same line goes to the Log panel. The
+task can be cancelled between files. A cancelled scan writes the binaries it
+finished to `binary_analysis_results.cancelled.parquet` and leaves the last
+complete report untouched. The completion dialog names any files Binary Ninja
+could not load.
 
 ## Output Format
 
