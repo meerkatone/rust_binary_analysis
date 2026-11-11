@@ -229,6 +229,9 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     // Hash and entropy describe the original input file, not Binary Ninja's
     // potentially sparse or synthesized virtual address space.
     let file_bytes = fs::read(path).ok()?;
+    let file_hash = get_hash(&file_bytes);
+    let entropy = compute_entropy(&file_bytes);
+    drop(file_bytes);
     let bv = binaryninja::load(path)?;
 
     let functions = bv.functions();
@@ -253,7 +256,6 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let avg_cc = average_complexity(&complexities);
 
     let filename = get_file_name(path);
-    let file_hash = get_hash(&file_bytes);
     let architecture = get_architecture(&bv);
     let endianness = get_endianness(&bv);
 
@@ -271,7 +273,6 @@ fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     let segment_info = get_segments(&bv);
     let xrefs = find_xrefs_to_dangerous_functions(&bv);
 
-    let entropy = compute_entropy(&file_bytes);
     // Views parented to an open FileMetadata are not freed on drop.
     bv.file().close();
 
@@ -314,30 +315,31 @@ fn is_excluded_input(path: &Path, output_file: &Path) -> bool {
     hidden || is_output
 }
 
-/// `results.parquet` -> `results.cancelled.parquet`, so a cancelled run never
-/// replaces the last complete report.
-fn cancelled_output_path(path: &Path) -> PathBuf {
+/// Add a partial-run suffix so cancelled or failed scans keep the complete report.
+fn partial_output_path(path: &Path, suffix: &str) -> PathBuf {
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| "binary_analysis_results".to_string());
     let name = match path.extension() {
-        Some(extension) => format!("{stem}.cancelled.{}", extension.to_string_lossy()),
-        None => format!("{stem}.cancelled"),
+        Some(extension) => format!("{stem}.{suffix}.{}", extension.to_string_lossy()),
+        None => format!("{stem}.{suffix}"),
     };
     path.with_file_name(name)
 }
 
 /// Files to analyse, in sorted order so report rows are stable across runs.
-/// Both reports this plugin writes into the directory are left out.
+/// All reports this plugin writes into the directory are left out.
 fn collect_inputs(directory: &Path, output_file: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let partial_output = cancelled_output_path(output_file);
+    let partial_output = partial_output_path(output_file, "cancelled");
+    let incomplete_output = partial_output_path(output_file, "incomplete");
     let mut paths = Vec::new();
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if path.is_file()
             && !is_excluded_input(&path, output_file)
             && !is_excluded_input(&path, &partial_output)
+            && !is_excluded_input(&path, &incomplete_output)
         {
             paths.push(path);
         }
@@ -361,6 +363,15 @@ fn analyse_directory(
     output_file: &Path,
     on_file: &dyn Fn(usize, usize, &Path) -> bool,
 ) -> Result<DirectoryOutcome, Box<dyn std::error::Error>> {
+    analyse_directory_with_loader(directory, output_file, on_file, &analyse_binary)
+}
+
+fn analyse_directory_with_loader(
+    directory: &Path,
+    output_file: &Path,
+    on_file: &dyn Fn(usize, usize, &Path) -> bool,
+    load: &dyn Fn(&Path) -> Option<BinaryAnalysisResult>,
+) -> Result<DirectoryOutcome, Box<dyn std::error::Error>> {
     let binary_paths = collect_inputs(directory, output_file)?;
 
     let mut results = Vec::new();
@@ -371,14 +382,16 @@ fn analyse_directory(
             cancelled = true;
             break;
         }
-        match analyse_binary(path) {
+        match load(path) {
             Some(result) => results.push(result),
             None => failed.push(get_file_name(path)),
         }
     }
 
     let report = if cancelled {
-        cancelled_output_path(output_file)
+        partial_output_path(output_file, "cancelled")
+    } else if !failed.is_empty() {
+        partial_output_path(output_file, "incomplete")
     } else {
         output_file.to_path_buf()
     };
@@ -469,6 +482,9 @@ fn outcome_message(outcome: &DirectoryOutcome) -> String {
         message.push_str("\nThe scan was cancelled; the previous complete report was kept.");
     }
     if !outcome.failed.is_empty() {
+        if !outcome.cancelled {
+            message.push_str("\nThe scan was incomplete; the previous complete report was kept.");
+        }
         message.push_str(&format!(
             "\n{} file(s) could not be loaded: {}",
             outcome.failed.len(),
@@ -515,6 +531,8 @@ fn analyse_directory_callback(_bv: &BinaryView) {
                     (
                         if outcome.cancelled {
                             "Analysis Cancelled".to_string()
+                        } else if !outcome.failed.is_empty() {
+                            "Analysis Incomplete".to_string()
                         } else {
                             "Analysis Complete".to_string()
                         },
@@ -598,20 +616,20 @@ mod tests {
     }
 
     #[test]
-    fn inputs_are_sorted_and_skip_both_reports() {
+    fn inputs_are_sorted_and_skip_all_reports() {
         let directory = std::env::temp_dir().join(format!(
             "rust_binary_analysis_{}_inputs",
             std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
         let output = directory.join("binary_analysis_results.parquet");
-        let partial = cancelled_output_path(&output);
+        let partial = partial_output_path(&output, "cancelled");
         assert_eq!(
             partial,
             directory.join("binary_analysis_results.cancelled.parquet")
         );
         assert_eq!(
-            cancelled_output_path(Path::new("/out/report")),
+            partial_output_path(Path::new("/out/report"), "cancelled"),
             Path::new("/out/report.cancelled")
         );
         for name in ["zeta.bin", "alpha.bin", ".hidden", "mid.so"] {
@@ -619,6 +637,7 @@ mod tests {
         }
         fs::write(&output, b"x").unwrap();
         fs::write(&partial, b"x").unwrap();
+        fs::write(partial_output_path(&output, "incomplete"), b"x").unwrap();
         fs::create_dir_all(directory.join("subdirectory")).unwrap();
         let inputs = collect_inputs(&directory, &output).unwrap();
         let names: Vec<_> = inputs.iter().map(|path| get_file_name(path)).collect();
@@ -644,7 +663,7 @@ mod tests {
         .unwrap();
         assert!(outcome.cancelled);
         assert_eq!(outcome.analysed, 0);
-        assert_eq!(outcome.report, cancelled_output_path(&output));
+        assert_eq!(outcome.report, partial_output_path(&output, "cancelled"));
         assert_eq!(fs::read(&output).unwrap(), b"previous complete report");
         assert!(fs::metadata(&outcome.report).unwrap().len() > 0);
         let message = outcome_message(&DirectoryOutcome {
@@ -656,6 +675,29 @@ mod tests {
         assert!(message.contains("Analysed 2 binaries"));
         assert!(message.contains("cancelled"));
         assert!(message.contains("1 file(s) could not be loaded: broken.bin"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_scan_preserves_complete_report_and_excludes_partial_reports() {
+        let directory =
+            std::env::temp_dir().join(format!("analysis_failed_{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("binary_analysis_results.parquet");
+        fs::write(&output, b"complete report").unwrap();
+        fs::write(directory.join("broken.bin"), b"broken").unwrap();
+        let outcome =
+            analyse_directory_with_loader(&directory, &output, &|_, _, _| true, &|_| None).unwrap();
+        assert!(!outcome.cancelled);
+        assert_eq!(outcome.failed, ["broken.bin"]);
+        assert_eq!(outcome.report, partial_output_path(&output, "incomplete"));
+        assert!(outcome_message(&outcome).contains("previous complete report was kept"));
+        assert_eq!(fs::read(&output).unwrap(), b"complete report");
+        assert!(fs::metadata(&outcome.report).unwrap().len() > 0);
+        assert_eq!(
+            collect_inputs(&directory, &output).unwrap(),
+            [directory.join("broken.bin")]
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

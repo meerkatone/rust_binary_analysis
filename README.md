@@ -85,7 +85,14 @@ The scan runs as a background task: the status bar shows
 task can be cancelled between files. A cancelled scan writes the binaries it
 finished to `binary_analysis_results.cancelled.parquet` and leaves the last
 complete report untouched. The completion dialog names any files Binary Ninja
-could not load.
+could not load. If any file fails to load, the scan instead writes
+`binary_analysis_results.incomplete.parquet` and reports **Analysis Incomplete**;
+it also preserves the last complete report. All three report filenames are
+excluded from subsequent scans.
+
+Hashing and entropy are computed before loading the analysis view, and the
+raw input buffer is released immediately afterward. This avoids retaining a
+second full copy of the input throughout analysis.
 
 ## Output Format
 
