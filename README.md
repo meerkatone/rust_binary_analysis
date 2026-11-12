@@ -90,9 +90,10 @@ could not load. If any file fails to load, the scan instead writes
 it also preserves the last complete report. All three report filenames are
 excluded from subsequent scans.
 
-Hashing and entropy are computed before loading the analysis view, and the
-raw input buffer is released immediately afterward. This avoids retaining a
-second full copy of the input throughout analysis.
+SHA-256 and entropy are computed together in one streaming pass before loading
+an analysis view. This uses a fixed 64 KiB read buffer and 256 byte counters,
+so preprocessing no longer allocates a buffer the size of the input. Read
+failures still mark the file as incomplete and preserve the complete report.
 
 ## Output Format
 

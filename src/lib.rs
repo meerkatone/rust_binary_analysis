@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -78,6 +79,7 @@ fn get_endianness(bv: &BinaryView) -> String {
     }
 }
 
+#[cfg(test)]
 fn get_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -104,17 +106,12 @@ fn complexity_from_counts(edges: u64, nodes: u64) -> u32 {
     complexity as u32
 }
 
-fn compute_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() {
+fn entropy_from_counts(byte_count: &[u64; 256]) -> f64 {
+    let total: u64 = byte_count.iter().sum();
+    if total == 0 {
         return 0.0;
     }
-
-    let mut byte_count = [0u64; 256];
-    for &byte in data {
-        byte_count[usize::from(byte)] += 1;
-    }
-
-    let data_length = data.len() as f64;
+    let data_length = total as f64;
     let mut entropy = 0.0;
 
     for &count in byte_count.iter().filter(|&&count| count != 0) {
@@ -123,6 +120,38 @@ fn compute_entropy(data: &[u8]) -> f64 {
     }
 
     entropy
+}
+
+/// Hash and count bytes in one bounded-memory pass, before loading a view.
+fn file_statistics(reader: &mut impl Read) -> std::io::Result<(String, f64)> {
+    let mut hasher = Sha256::new();
+    let mut counts = [0u64; 256];
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let length = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        hasher.update(&buffer[..length]);
+        for &byte in &buffer[..length] {
+            counts[usize::from(byte)] += 1;
+        }
+    }
+    Ok((
+        format!("{:x}", hasher.finalize()),
+        entropy_from_counts(&counts),
+    ))
+}
+
+#[cfg(test)]
+fn compute_entropy(data: &[u8]) -> f64 {
+    let mut counts = [0u64; 256];
+    for &byte in data {
+        counts[usize::from(byte)] += 1;
+    }
+    entropy_from_counts(&counts)
 }
 
 fn decode_string(bv: &BinaryView, start: u64, length: usize, ty: StringType) -> String {
@@ -228,10 +257,7 @@ fn find_xrefs_to_dangerous_functions(bv: &BinaryView) -> Vec<XrefInfo> {
 fn analyse_binary(path: &Path) -> Option<BinaryAnalysisResult> {
     // Hash and entropy describe the original input file, not Binary Ninja's
     // potentially sparse or synthesized virtual address space.
-    let file_bytes = fs::read(path).ok()?;
-    let file_hash = get_hash(&file_bytes);
-    let entropy = compute_entropy(&file_bytes);
-    drop(file_bytes);
+    let (file_hash, entropy) = file_statistics(&mut fs::File::open(path).ok()?).ok()?;
     let bv = binaryninja::load(path)?;
 
     let functions = bv.functions();
@@ -594,6 +620,48 @@ mod tests {
         assert!((compute_entropy(&[0, 1, 0, 1]) - 1.0).abs() < 1e-12);
         let every_byte: Vec<u8> = (0..=u8::MAX).collect();
         assert!((compute_entropy(&every_byte) - 8.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn streaming_statistics_match_whole_file_hash_and_entropy() {
+        for length in [0, 1, 65535, 65536, 65537, 200_000] {
+            let data: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            let (hash, entropy) = file_statistics(&mut data.as_slice()).unwrap();
+            assert_eq!(hash, get_hash(&data));
+            assert_eq!(entropy, compute_entropy(&data));
+        }
+    }
+
+    #[test]
+    fn streaming_statistics_retry_interruptions_and_propagate_read_errors() {
+        struct Reader(usize);
+        impl Read for Reader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                match self.0 {
+                    1 => Err(std::io::ErrorKind::Interrupted.into()),
+                    2 => {
+                        buffer[0] = b'x';
+                        Ok(1)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        assert_eq!(
+            file_statistics(&mut Reader(0)).unwrap(),
+            (get_hash(b"x"), 0.0)
+        );
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        assert_eq!(
+            file_statistics(&mut Broken).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
